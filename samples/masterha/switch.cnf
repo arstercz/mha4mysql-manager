@@ -1,0 +1,53 @@
+# sharp-sign starts a comment
+# ip:port are not indented
+# any other non-indented lines are default directives
+#   settings are indented
+# all of the block_user and block_host are optianal
+# We support 4 mode
+#  - none
+#  - vip
+#  - proxysql
+#  - consul dns
+
+## only switch master and slave
+#10.1.1.25:3301 10.1.1.26:3301
+#   mode none
+#   block_user ^percona$
+#   block_host ^10\.1\.1\.%$
+
+## also switch vip
+#10.1.1.25:3327 10.1.1.26:3327
+#   mode vip
+#   vip 10.1.1.60
+#   block_user ^percona$
+#   block_host ^10\.0\.21\.%$
+
+## also switch proxysql
+#10.1.1.25:3327 10.1.1.26:3327
+#   mode proxysql
+#   proxysql admin2:admin2@10.1.1.27:6032:w1:r2
+#   block_user ^percona$
+#   block_host ^10\.0\.21\.%$
+
+# also switch consul dns
+# the following are optional
+#   consul_bin,      # default is /usr/bin/consul
+#   consul_token,    # must set when you enable acl
+#   consul_dns_port  # default is 53
+#   consul_http_port # default is 8500
+#   consul_domain    # default is consul
+#
+# the following are must set:
+#   consul_name      # must set, the same as dns prefix
+#   consul_servers   # consul cluster servers
+#
+# the following can generate dns: mysql-3327.service.infodb
+10.1.1.25:3327 10.1.1.26:3327
+   mode dns
+   dns_auto true
+   consul_bin /usr/local/bin/consul
+   consul_name mysql-3327
+   consul_servers 10.1.1.27,10.1.1.28,10.1.1.29
+   consul_domain infodb
+   block_user ^percona$
+   block_host ^10\.0\.21\.%$

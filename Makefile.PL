@@ -11,6 +11,7 @@ requires 'Config::Tiny';
 requires 'Log::Dispatch';
 requires 'Parallel::ForkManager';
 requires 'MHA::NodeConst';
+requires 'Net::DNS';
 
 license 'GPL v2';
 author 'Yoshinori Matsunobu <Yoshinori.Matsunobu@gmail.com>';

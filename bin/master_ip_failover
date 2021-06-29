@@ -1,0 +1,454 @@
+#!/usr/bin/env perl
+
+#  Copyright (C) 2011 DeNA Co.,Ltd.
+#
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#  Foundation, Inc.,
+#  51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+# refer to mha4mysql-manager/samples/scripts/master_ip_failover
+
+use strict;
+use warnings FATAL => 'all';
+
+use Getopt::Long;
+use MHA::DBHelper;
+use MHA::Extra;
+use Time::HiRes qw( gettimeofday );
+use Carp;
+
+use constant SCRIPT_CONF   => '/etc/masterha/switch.cnf';
+my $config = MHA::Extra::Config->new(SCRIPT_CONF);
+die "Need meaningful configuration in " . SCRIPT_CONF if $config->is_empty;
+
+my (
+  $command,   $ssh_user,  $ssh_options    ,    $orig_master_host,
+  $orig_master_ip,       $orig_master_port,    $orig_master_ssh_host,
+  $orig_master_ssh_port, $orig_master_ssh_ip,  $orig_master_ssh_user,
+  $new_master_host,      $new_master_ip,       $new_master_port,
+  $new_master_user,      $new_master_password, $new_master_ssh_host,
+  $new_master_ssh_ip,    $new_master_ssh_port, $new_master_ssh_user
+);
+GetOptions(
+  'command=s'              => \$command,
+  'ssh_user=s'             => \$ssh_user,
+  'ssh_options=s'          => \$ssh_options,
+  'orig_master_host=s'     => \$orig_master_host,
+  'orig_master_ip=s'       => \$orig_master_ip,
+  'orig_master_port=i'     => \$orig_master_port,
+  'orig_master_ssh_host=s' => \$orig_master_ssh_host,
+  'orig_master_ssh_ip=s'   => \$orig_master_ssh_ip,
+  'orig_master_ssh_port=i' => \$orig_master_ssh_port,
+  'orig_master_ssh_user=s' => \$orig_master_ssh_user,
+  'new_master_host=s'      => \$new_master_host,
+  'new_master_ip=s'        => \$new_master_ip,
+  'new_master_port=i'      => \$new_master_port,
+  'new_master_user=s'      => \$new_master_user,
+  'new_master_password=s'  => \$new_master_password,
+  'new_master_ssh_host=s'  => \$new_master_ssh_host,
+  'new_master_ssh_ip=s'    => \$new_master_ssh_ip,
+  'new_master_ssh_port=i'  => \$new_master_ssh_port,
+  'new_master_ssh_user=s'  => \$new_master_ssh_user,
+);
+
+sub current_time_us {
+  my ( $sec, $microsec ) = gettimeofday();
+  my $curdate = localtime($sec);
+  return $curdate . "." . sprintf( "%06d", $microsec );
+}
+
+$orig_master_ssh_ip ||= $orig_master_ssh_host
+  || $orig_master_ip
+  || $orig_master_host;
+$new_master_ssh_ip ||= $new_master_ssh_host
+  || $new_master_ip
+  || $new_master_host;
+
+
+
+exit &main();
+
+sub main {
+  if ( $command eq "stop" || $command eq "stopssh" ) {
+
+    # $orig_master_host, $orig_master_ip, $orig_master_port are passed.
+    # If you manage master ip address at global catalog database,
+    # invalidate orig_master_ip here.
+    my $exit_code = 1;
+    eval {
+      my $cfg  = $config->lookup( $orig_master_ip, $orig_master_port )
+        or die "lookup failed with $orig_master_ip:$orig_master_port";
+      my $mode = $cfg->{mode};
+
+      # proxysql setting 
+      if ($mode eq 'proxysql') {
+        print current_time_us() . " Stoping and change proxysql..\n";
+        foreach my $list (@{$cfg->{proxysql}}) {
+          my $proxysql_handler = new MHA::Extra::Proxysql();
+          $proxysql_handler->connect( $list->{'ip'}, $list->{'port'},
+            $list->{'user'}, $list->{'pass'}, "", 1); 
+          next unless $proxysql_handler->{dbh};
+        
+          # delete repl group
+          if ($proxysql_handler->proxysql_delete_repl_group($list->{'wgroup'}, 
+             $list->{'rgroup'})) {
+            print current_time_us()
+                  . " delete proxysql repl group on "
+                  . $list->{'ip'} . ":" . $list->{'port'}
+                  . " ok!\n"
+          }   
+          else {
+            croak " delete proxysql repl group error!";
+          }   
+          if ($proxysql_handler->proxysql_load_server_to_runtime()) {
+            print current_time_us()
+                  . " load servers to runtime ok!";
+          }
+          else {
+            croak " load servers to runtime error!";
+          }
+        
+          # set readonly to disable proxysql update configure in runtime;
+          if ($proxysql_handler->proxysql_readonly()) {
+            print current_time_us()
+                  . " set read_only on proxysql "
+                  . $list->{'ip'} . ":" . $list->{'port'}
+                  . " ok!\n";
+          }
+          else {
+            carp " set proxysql readonly failed!";
+          }
+          $proxysql_handler->disconnect();
+        }
+        $exit_code = 0;
+      }
+
+      if ($mode eq 'vip') {
+        print current_time_us() . " Stopping and change vip " . $cfg->{vip} . "..\n";
+        my $iphelper = MHA::Extra::IpHelper->new(
+          host => $orig_master_ssh_ip,
+          port => $orig_master_ssh_port,
+          user => $ssh_user,
+          option => $ssh_options,
+        );
+        eval {
+          $iphelper->stop_vip( $cfg->{vip} );
+        };  
+        if ($@ && $@ =~ /No route to host/) {
+          $exit_code = 0;
+        }   
+        else {
+          $exit_code = 0;
+        }
+      }
+
+      if ($mode eq 'dns') {
+        print current_time_us() . " Stopping and change dns " .  $cfg->{consul_name} . "\n";
+        my $dnsh = MHA::Extra::DNS->new(
+          consul_bin       => $cfg->{consul_bin} || undef,
+          consul_name      => $cfg->{consul_name},
+          consul_token     => $cfg->{consul_token} || undef,
+          consul_dns_port  => $cfg->{consul_dns_port} || 53,
+          consul_http_port => $cfg->{consul_http_port} || 8500,
+          consul_servers   => $cfg->{consul_servers},
+          consul_domain    => $cfg->{consul_domain} || 'consul',
+        );
+        if ($dnsh->delete_dns()) {
+          my $n = 5;
+          my $status = 0;
+          while($n--) {
+            if ($dnsh->is_dns_ok($orig_master_ip)) {
+              sleep(2);
+              print current_time_us() . " Retry dns check.\n";
+            }
+            else {
+              $status = 1;
+              last;
+            }
+          }
+          if ($status) {
+            print current_time_us() . " ok - deregister $cfg->{consul_name}, and dns resolve is valid!";
+            $exit_code = 0;
+          }
+          else {
+            croak " error - deregister $cfg->{consul_name}, but dns resolve is not valid!";
+          }
+        }
+      }
+
+      $exit_code = 0;
+    };
+    if ($@) {
+      warn "Got Error: $@\n";
+      exit $exit_code;
+    }
+    exit $exit_code;
+  }
+  elsif ( $command eq "start" ) {
+
+    # all arguments are passed.
+    # If you manage master ip address at global catalog database,
+    # activate new_master_ip here.
+    # You can also grant write access (create user, set read_only=0, etc) here.
+    my $exit_code = 10;
+    eval {
+      my $new_master_handler = new MHA::Extra::DBHelper();
+      my $cfg  = $config->lookup( $new_master_ip, $new_master_port )
+        or die "lookup failed with $new_master_ip:$new_master_port";
+      my $mode = $cfg->{mode};
+
+      # args: hostname, port, user, password, raise_error_or_not
+      $new_master_handler->connect( $new_master_ip, $new_master_port,
+        $new_master_user, $new_master_password, 1 );
+
+      ## Set read_only=0 on the new master
+      $new_master_handler->disable_log_bin_local();
+      print "Set read_only=0 on the new master.\n";
+      $new_master_handler->disable_read_only();
+
+      ## change rpl_semi_sync variables if enable semi replication
+      print current_time_us() 
+        . " reset new master rpl_semi_sync variables if enable semi replication\n";
+      $new_master_handler->rpl_semi_new_master_set();
+      
+      $new_master_handler->enable_log_bin_local();
+      # set event scheduler
+      print current_time_us()
+        . " set on the scheduler if new master enable the event scheduler.\n";
+      $new_master_handler->set_event_scheduler_on();
+
+      $new_master_handler->disconnect();
+
+      # proxysql setting
+      if ($mode eq 'proxysql') {
+        print current_time_us() . " Starting and change proxysql\n";
+        foreach my $list (@{$cfg->{proxysql}}) {
+          my $proxysql_handler =  new MHA::Extra::Proxysql();
+          $proxysql_handler->connect($list->{'ip'}, $list->{'port'},
+             $list->{'user'}, $list->{'pass'}, 1);
+          next unless $proxysql_handler->{dbh};
+
+          # enable proxysql readwrite 
+          if ($proxysql_handler->proxysql_readwrite()) {
+            print current_time_us() . " set proxysql "
+                 . $list->{ip} . ":" . $list->{port}
+                 . " readwrite ok!\n"
+          }
+          else {
+            carp "set proxysql readwrite error!";
+            next;
+          }
+          # delete old read/write group with original master
+          if ($proxysql_handler->proxysql_delete_group($list->{wgroup},
+             $list->{rgroup}, $orig_master_host, $orig_master_port)) {
+            print current_time_us()
+                 . " Delete old proxysql write group "
+                 . "$orig_master_host:$orig_master_port"
+                 . " with group " . $list->{'wgroup'} . " ok!\n";
+
+          }
+          else {
+            croak "delete old proxysql write group error!";
+          }
+          # insert new write group
+          if ($proxysql_handler->proxysql_insert_new_server($list->{'wgroup'},
+                $new_master_host, $new_master_port, 0)) {
+            print current_time_us()
+                  . " Insert new proxysql write group "
+                  . "$new_master_host:$new_master_port"
+                  . " with group " . $list->{'wgroup'} . " ok!\n";
+          }
+          else {
+            croak "insert new write group error!";
+          }
+
+          # insert new read group
+          if ($proxysql_handler->proxysql_insert_new_server($list->{'rgroup'},
+                $new_master_host, $new_master_port, 0)) {
+            print current_time_us()
+                  . " Insert new proxysql read group "
+                  . "$new_master_host:$new_master_port"
+                  . " with group " . $list->{'rgroup'} . " ok!\n";
+          }
+          else {
+            croak "insert new read group error!";
+          }
+          # insert new repl group
+          if ($proxysql_handler->proxysql_insert_repl_group($list->{'wgroup'},
+             $list->{'rgroup'})) {
+            print current_time_us()
+                  . " insert proxysql repl group on "
+                  . $list->{'ip'} . ":" . $list->{'port'}
+                  . " ok!\n"
+          }
+          else {
+            croak " insert proxysql repl group error!";
+          }
+          # load mysql servers to runtime.
+          if ($proxysql_handler->proxysql_load_server_to_runtime()) {
+            print current_time_us() . " proxysql load server to runtime ok!\n";
+          }
+          else {
+            croak "proxysql load mysql server to runtime error!";
+          }
+
+          if ($proxysql_handler->proxysql_save_server_to_disk()) {
+            print current_time_us() . " proxysql save server to disk ok!\n";
+            $exit_code = 0;
+          }
+          else {
+            carp "proxysql save mysql server to disk error!";
+          }
+        }
+      }
+
+      if ($mode eq 'vip') {
+        print current_time_us() . " Starting and change " . $cfg->{vip} . " on the new master..\n";
+        my $iphelper = MHA::Extra::IpHelper->new(
+          host => $new_master_ssh_ip,
+          port => $new_master_ssh_port,
+          user => $ssh_user,
+          option => $ssh_options,
+        );
+        $iphelper->start_vip( $cfg->{vip},
+          ( $cfg->{vip_on_loopback} ? ('lo') : () ) );
+      }
+
+      if ($mode eq 'dns') {
+        print current_time_us() . "Starting and change dns " . $cfg->{consul_name} . " with new master..\n";
+        my $dnsh = MHA::Extra::DNS->new(
+          consul_bin       => $cfg->{consul_bin} || undef,
+          consul_name      => $cfg->{consul_name},
+          consul_token     => $cfg->{consul_token} || undef,
+          consul_dns_port  => $cfg->{consul_dns_port} || 53,
+          consul_http_port => $cfg->{consul_http_port} || 8500,
+          consul_servers   => $cfg->{consul_servers},
+          consul_domain    => $cfg->{consul_domain} || 'consul',
+        );
+        if ($dnsh->create_dns($new_master_ip, $new_master_port)) {
+           my $n = 3;
+           my $status = 0;
+           while($n--) {
+             if ($dnsh->is_dns_ok($new_master_ip)) {
+               $status = 1;
+               last;
+             }
+             else {
+               sleep 1;
+               print current_time_us() . " Retry dns check.\n";
+             }
+           }
+           if ($status) {
+             print current_time_us() . " dns change to $new_master_ip ok!";
+             $exit_code = 0;
+           }
+           else {
+             croak " dns change to $new_master_ip error!";
+           }
+        }
+      }
+
+      $exit_code = 0;
+    };
+    if ($@) {
+      warn $@;
+
+      # If you want to continue failover, exit 10.
+      exit $exit_code;
+    }
+    exit $exit_code;
+  }
+  elsif ( $command eq "status" ) {
+    my $cfg  = $config->lookup( $orig_master_ip, $orig_master_port )
+      or die "lookup failed with $orig_master_ip:$orig_master_port";
+    my $mode = $cfg->{mode};
+
+    if ($mode eq 'proxysql') {
+      my $status = 0;
+      foreach my $list (@{$cfg->{proxysql}}) {
+        my $proxysql_handler =  new MHA::Extra::Proxysql();
+        $proxysql_handler->connect($list->{'ip'}, $list->{'port'},
+          $list->{'user'}, $list->{'pass'}, 1);
+
+        my $paddr = $list->{'ip'} . ":" . $list->{'port'};
+        if ($proxysql_handler->{dbh}) {
+          print current_time_us() . " proxysql $paddr is ok\n";
+        }
+        else {
+          print current_time_us() . " proxysql $paddr is error\n";
+          $status++;
+        }
+      }
+      exit $status;
+    }
+    if ($mode eq 'vip') {
+      my $iphelper = MHA::Extra::IpHelper->new(
+        host => $orig_master_ssh_ip,
+        port => $orig_master_ssh_port,
+        user => $ssh_user,
+        option => $ssh_options,
+      );
+
+      if ( $iphelper->check_node_vip( $cfg->{vip} ) ) {
+        print current_time_us() . " vip $cfg->{vip} is configured\n";
+        exit 0;
+      }
+      else {
+        print current_time_us() . " neither vip $cfg->{vip} is not configured on host $orig_master_ssh_host nor does not use proxysql\n";
+        exit 1;
+      }
+    }
+    if ($mode eq 'dns') {
+      my $dnsh = MHA::Extra::DNS->new(
+        consul_bin       => $cfg->{consul_bin} || undef,
+        consul_name      => $cfg->{consul_name},
+        consul_token     => $cfg->{consul_token} || undef,
+        consul_dns_port  => $cfg->{consul_dns_port} || 53,
+        consul_http_port => $cfg->{consul_http_port} || 8500,
+        consul_servers   => $cfg->{consul_servers},
+        consul_domain    => $cfg->{consul_domain} || 'consul',
+      );
+
+      if ($dnsh->is_dns_ok($orig_master_ip)) {
+        print current_time_us . " dns check ok\n";
+        exit 0;
+      }
+      else {
+        print current_time_us . " dns check error\n";
+        if ($cfg->{dns_auto} =~ /\btrue\b/i) {
+          print current_time_us . " auto register service $cfg->{consul_name}\n";
+          if ($dnsh->create_dns($orig_master_ip, $orig_master_port)) {
+            print current_time_us . " auto create $cfg->{consul_name} ok.\n";
+            exit 0;
+          }
+          else {
+            print current_time_us . " auto create $cfg->{consul_name} error!\n";
+            exit 1;
+          }
+        }
+        exit 1;
+      }
+    }
+  }
+  else {
+    &usage();
+    exit 1;
+  }
+}
+
+sub usage {
+  print
+"Usage: master_ip_failover --command=start|stop|stopssh|status --orig_master_host=host --orig_master_ip=ip --orig_master_port=port --new_master_host=host --new_master_ip=ip --new_master_port=port\n";
+}
+

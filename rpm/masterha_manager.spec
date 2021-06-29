@@ -1,7 +1,7 @@
 Summary: Master High Availability Manager and Tools for MySQL, Manager Package
 Name: mha4mysql-manager
 Version: 0.58
-Release: 0%{?dist}
+Release: 1%{?dist}
 License: GPL v2
 Vendor: DeNA Co.,Ltd.
 Group: Manager
@@ -14,6 +14,7 @@ Requires: perl(Log::Dispatch)
 Requires: perl(Parallel::ForkManager)
 Requires: mha4mysql-node >= 0.54
 Requires: perl(DBD::mysql)
+Requires: perl(Net::DNS)
 Source0: mha4mysql-manager-%{version}.tar.gz
 
 %description
@@ -42,6 +43,13 @@ do
   [ -x $brp ] && $brp && break
 done
 
+# install masterha samples configure file
+%{__mkdir} -p ${RPM_BUILD_ROOT}/etc/masterha
+%{__install} -Dp -m0755 samples/masterha/README.md ${RPM_BUILD_ROOT}/etc/masterha/README.md
+%{__install} -Dp -m0755 samples/masterha/switch.cnf ${RPM_BUILD_ROOT}/etc/masterha/switch.cnf
+%{__install} -Dp -m0755 samples/masterha/default.cnf ${RPM_BUILD_ROOT}/etc/masterha/default.cnf
+%{__install} -Dp -m0755 samples/masterha/app_sample.cnf ${RPM_BUILD_ROOT}/etc/masterha/app_sample.cnf
+
 find $RPM_BUILD_ROOT -type f \
 | sed "s@^$RPM_BUILD_ROOT@@g" \
 > %{name}-%{version}-%{release}-filelist
@@ -57,7 +65,34 @@ rm -rf $RPM_BUILD_ROOT
 %files -f %{name}-%{version}-%{release}-filelist
 %defattr(-,root,root,-)
 
+%post
+
+cat <<BANNER
+
+------------------------------------------------------------
+Support 4 switch type:
+  none:     only switch replication;
+  vip:      switch replication and vip address;
+  proxysql: switch replication and proxysql;
+  dns:      switch replication and consul dns;
+
+New default configure file:
+  /etc/masterha
+
+New bin scripts:
+  /usr/bin/master_ip_failover
+  /usr/bin/master_ip_online_change
+
+zhe.chen<chenzhe07@gmail.com>
+------------------------------------------------------------
+BANNER
+
 %changelog
+* Thu Jun 29 2021 zhe.chen <chenzhe07@gmail.com>
+- add MHA::Extra module
+- change default master_ip_failover and master_ip_online_change
+- change to default configure: /etc/masterha
+
 * Thu Mar 22 2018 Kenny.Gryp <kenny@goss.be>
 - Several bugfixes
 - IPV6 support

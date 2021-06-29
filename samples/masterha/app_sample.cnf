@@ -1,0 +1,18 @@
+[server default]
+manager_workdir=/data/masterhalog
+manager_log=/data/masterhalog/app_57.log
+port=3327
+client_bindir=/opt/Percona-Server-5.7.28-31-Linux.x86_64.ssl101/bin
+client_libdir=/opt/Percona-Server-5.7.28-31-Linux.x86_64.ssl101/lib/mysql
+repl_user=user_replica
+repl_password=xxxxxxxxxxxxx
+
+[server1]
+hostname=10.1.1.26
+master_binlog_dir=/data/mysql/node3327/data/
+candidate_master=1
+
+[server2]
+hostname=10.1.1.25
+master_binlog_dir=/data/mysql/node3327/data/
+candidate_master=1
