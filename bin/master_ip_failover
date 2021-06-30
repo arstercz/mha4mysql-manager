@@ -405,7 +405,7 @@ sub main {
         exit 0;
       }
       else {
-        print current_time_us() . " neither vip $cfg->{vip} is not configured on host $orig_master_ssh_host nor does not use proxysql\n";
+        print current_time_us() . " neither vip $cfg->{vip} is not configured on host $orig_master_ip\n";
         exit 1;
       }
     }
